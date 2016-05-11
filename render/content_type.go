@@ -3,7 +3,7 @@ package render
 import (
 	"strings"
 
-	"github.com/pressly/chi"
+	"github.com/hmgle/chi"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/net/context"
 )

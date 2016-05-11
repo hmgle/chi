@@ -6,9 +6,9 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/pressly/chi"
-	"github.com/pressly/chi/middleware"
-	"github.com/pressly/chi/render"
+	"github.com/hmgle/chi"
+	"github.com/hmgle/chi/middleware"
+	"github.com/hmgle/chi/render"
 	"github.com/valyala/fasthttp"
 
 	"golang.org/x/net/context"

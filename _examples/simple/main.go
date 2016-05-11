@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/pressly/chi"
-	"github.com/pressly/chi/middleware"
+	"github.com/hmgle/chi"
+	"github.com/hmgle/chi/middleware"
 	"github.com/valyala/fasthttp"
 
 	"golang.org/x/net/context"
