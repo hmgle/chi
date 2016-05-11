@@ -1,28 +1,66 @@
 package chi
 
 import (
+	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/valyala/fasthttp"
+
 	"golang.org/x/net/context"
 )
 
+type readWriter struct {
+	net.Conn
+	r bytes.Buffer
+	w bytes.Buffer
+}
+
+var zeroTCPAddr = &net.TCPAddr{
+	IP: net.IPv4zero,
+}
+
+func (rw *readWriter) Close() error {
+	return nil
+}
+
+func (rw *readWriter) Read(b []byte) (int, error) {
+	return rw.r.Read(b)
+}
+
+func (rw *readWriter) Write(b []byte) (int, error) {
+	return rw.w.Write(b)
+}
+
+func (rw *readWriter) RemoteAddr() net.Addr {
+	return zeroTCPAddr
+}
+
+func (rw *readWriter) LocalAddr() net.Addr {
+	return zeroTCPAddr
+}
+
+func (rw *readWriter) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (rw *readWriter) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
 func TestMuxServeHTTP(t *testing.T) {
 	r := NewRouter()
-	r.Get("/hi", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("bye"))
+	r.Get("/hi", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("bye"))
 	})
-	r.NotFound(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		w.Write([]byte("nothing here"))
+	r.NotFound(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(404)
+		fctx.Write([]byte("nothing here"))
 	})
 
 	// Thanks to https://github.com/mrcpvn for the nice table test code
@@ -47,108 +85,121 @@ func TestMuxServeHTTP(t *testing.T) {
 	}
 
 	for _, tc := range testcases {
-		resp := httptest.NewRecorder()
-		req, err := http.NewRequest(tc.Method, tc.Path, nil)
-		if err != nil {
-			t.Fatalf("%v", err)
+		s := &fasthttp.Server{
+			Handler: r.ServeHTTP,
 		}
-		r.ServeHTTP(resp, req)
-		b, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("%v", err)
+		rw := &readWriter{}
+		ch := make(chan error)
+
+		rw.r.WriteString(tc.Method + " " + tc.Path + " HTTP/1.1\r\n\r\n")
+		go func() {
+			ch <- s.ServeConn(rw)
+		}()
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Fatalf("return error %s", err)
+			}
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("timeout")
 		}
-		if resp.Code != tc.ExpectedStatus {
-			t.Fatalf("%v != %v", tc.ExpectedStatus, resp.Code)
+		br := bufio.NewReader(&rw.w)
+		var resp fasthttp.Response
+		if err := resp.Read(br); err != nil {
+			t.Fatalf("Unexpected error when reading response: %s", err)
 		}
-		if string(b) != tc.ExpectedBody {
-			t.Fatalf("%s != %s", tc.ExpectedBody, b)
+		if resp.Header.StatusCode() != tc.ExpectedStatus {
+			t.Fatalf("%v != %v", tc.ExpectedStatus, resp.Header.StatusCode())
+		}
+		if !bytes.Equal(resp.Body(), []byte(tc.ExpectedBody)) {
+			t.Fatalf("%s != %s", tc.ExpectedBody, string(resp.Body()))
 		}
 	}
 }
 
 func TestMux(t *testing.T) {
 	var count uint64
-	countermw := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	countermw := func(next Handler) Handler {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			count++
-			next.ServeHTTP(w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 
 	usermw := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			ctx = context.WithValue(ctx, "user", "peter")
-			next.ServeHTTPC(ctx, w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 
 	exmw := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			ctx = context.WithValue(ctx, "ex", "a")
-			next.ServeHTTPC(ctx, w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 	_ = exmw
 
 	logbuf := bytes.NewBufferString("")
 	logmsg := "logmw test"
-	logmw := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	logmw := func(next Handler) Handler {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			logbuf.WriteString(logmsg)
-			next.ServeHTTP(w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 	_ = logmw
 
-	cxindex := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	cxindex := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		user := ctx.Value("user").(string)
-		w.WriteHeader(200)
-		w.Write([]byte(fmt.Sprintf("hi %s", user)))
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte(fmt.Sprintf("hi %s", user)))
 	}
 
-	ping := func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("."))
+	ping := func(fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte("."))
 	}
 
-	headPing := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Ping", "1")
-		w.WriteHeader(200)
+	headPing := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Response.Header.Set("X-Ping", "1")
+		fctx.SetStatusCode(200)
 	}
 
-	createPing := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	createPing := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		// create ....
-		w.WriteHeader(201)
+		fctx.SetStatusCode(201)
 	}
 
-	pingAll := func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("ping all"))
+	pingAll := func(fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte("ping all"))
 	}
 	_ = pingAll
 
-	pingAll2 := func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("ping all2"))
+	pingAll2 := func(fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte("ping all2"))
 	}
 	_ = pingAll2
 
-	pingOne := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	pingOne := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		idParam := URLParam(ctx, "id")
 
-		w.WriteHeader(200)
-		w.Write([]byte(fmt.Sprintf("ping one id: %s", idParam)))
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte(fmt.Sprintf("ping one id: %s", idParam)))
 	}
 
-	pingWoop := func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("woop."))
+	pingWoop := func(fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte("woop."))
 	}
 	_ = pingWoop
 
-	catchAll := func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("catchall"))
+	catchAll := func(fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(200)
+		fctx.Write([]byte("catchall"))
 	}
 	_ = catchAll
 
@@ -171,11 +222,12 @@ func TestMux(t *testing.T) {
 	m.Handle("/admin/*", catchAll)
 	// m.Post("/admin/*", catchAll)
 
-	ts := httptest.NewServer(m)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: m.ServeHTTP,
+	}
 
 	// GET /
-	if resp := testRequest(t, ts, "GET", "/", nil); resp != "hi peter" {
+	if resp := testRequest(t, ts, "GET", "/"); resp != "hi peter" {
 		t.Fatalf(resp)
 	}
 	tlogmsg, _ := logbuf.ReadString(0)
@@ -184,152 +236,169 @@ func TestMux(t *testing.T) {
 	}
 
 	// GET /ping
-	if resp := testRequest(t, ts, "GET", "/ping", nil); resp != "." {
+	if resp := testRequest(t, ts, "GET", "/ping"); resp != "." {
 		t.Fatalf(resp)
 	}
 
 	// GET /pingall
-	if resp := testRequest(t, ts, "GET", "/pingall", nil); resp != "ping all" {
+	if resp := testRequest(t, ts, "GET", "/pingall"); resp != "ping all" {
 		t.Fatalf(resp)
 	}
 
 	// GET /ping/all
-	if resp := testRequest(t, ts, "GET", "/ping/all", nil); resp != "ping all" {
+	if resp := testRequest(t, ts, "GET", "/ping/all"); resp != "ping all" {
 		t.Fatalf(resp)
 	}
 
 	// GET /ping/all2
-	if resp := testRequest(t, ts, "GET", "/ping/all2", nil); resp != "ping all2" {
+	if resp := testRequest(t, ts, "GET", "/ping/all2"); resp != "ping all2" {
 		t.Fatalf(resp)
 	}
 
 	// GET /ping/123
-	if resp := testRequest(t, ts, "GET", "/ping/123", nil); resp != "ping one id: 123" {
+	if resp := testRequest(t, ts, "GET", "/ping/123"); resp != "ping one id: 123" {
 		t.Fatalf(resp)
 	}
 
 	// GET /ping/allan
-	if resp := testRequest(t, ts, "GET", "/ping/allan", nil); resp != "ping one id: allan" {
+	if resp := testRequest(t, ts, "GET", "/ping/allan"); resp != "ping one id: allan" {
 		t.Fatalf(resp)
 	}
 
 	// GET /ping/1/woop
-	if resp := testRequest(t, ts, "GET", "/ping/1/woop", nil); resp != "woop." {
+	if resp := testRequest(t, ts, "GET", "/ping/1/woop"); resp != "woop." {
 		t.Fatalf(resp)
 	}
 
 	// HEAD /ping
-	resp, err := http.Head(ts.URL + "/ping")
-	if err != nil {
-		t.Fatal(err)
+	rw := &readWriter{}
+	ch := make(chan error)
+	rw.r.WriteString("HEAD" + " " + "/ping" + " HTTP/1.1\r\n\r\n")
+	go func() {
+		ch <- ts.ServeConn(rw)
+	}()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Fatalf("return error %s", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("timeout")
 	}
-	if resp.StatusCode != 200 {
+	br := bufio.NewReader(&rw.w)
+	var resp fasthttp.Response
+	if err := resp.Read(br); err != nil {
+		t.Fatalf("Unexpected error when reading response: %s", err)
+	}
+	if resp.Header.StatusCode() != 200 {
 		t.Error("head failed, should be 200")
 	}
-	if resp.Header.Get("X-Ping") == "" {
+	if string(resp.Header.Peek("X-Ping")) == "" {
 		t.Error("expecting X-Ping header")
 	}
 
 	// GET /admin/catch-this
-	if resp := testRequest(t, ts, "GET", "/admin/catch-thazzzzz", nil); resp != "catchall" {
+	if resp := testRequest(t, ts, "GET", "/admin/catch-thazzzzz"); resp != "catchall" {
 		t.Fatalf(resp)
 	}
 
-	// POST /admin/catch-this
-	resp, err = http.Post(ts.URL+"/admin/casdfsadfs", "text/plain", bytes.NewReader([]byte{}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// TODO: POST /admin/catch-this
+	// resp, err = http.Post(ts.URL+"/admin/casdfsadfs", "text/plain", bytes.NewReader([]byte{}))
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
 
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	// body, err := ioutil.ReadAll(resp.Body)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	// defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		t.Error("POST failed, should be 200")
-	}
+	// if resp.StatusCode != 200 {
+	// 	t.Error("POST failed, should be 200")
+	// }
 
-	if string(body) != "catchall" {
-		t.Error("expecting response body: 'catchall'")
-	}
+	// if string(body) != "catchall" {
+	// 	t.Error("expecting response body: 'catchall'")
+	// }
 
 	// Custom http method DIE /ping/1/woop
-	if resp := testRequest(t, ts, "DIE", "/ping/1/woop", nil); resp != "Method Not Allowed" {
+	if resp := testRequest(t, ts, "DIE", "/ping/1/woop"); resp != "Method Not Allowed" {
 		t.Fatalf(resp)
 	}
 }
 
 func TestMuxPlain(t *testing.T) {
 	r := NewRouter()
-	r.Get("/hi", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("bye"))
+	r.Get("/hi", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("bye"))
 	})
-	r.NotFound(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		w.Write([]byte("nothing here"))
+	r.NotFound(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(404)
+		fctx.Write([]byte("nothing here"))
 	})
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
+	}
 
-	if resp := testRequest(t, ts, "GET", "/hi", nil); resp != "bye" {
+	if resp := testRequest(t, ts, "GET", "/hi"); resp != "bye" {
 		t.Fatalf(resp)
 	}
-	if resp := testRequest(t, ts, "GET", "/nothing-here", nil); resp != "nothing here" {
+	if resp := testRequest(t, ts, "GET", "/nothing-here"); resp != "nothing here" {
 		t.Fatalf(resp)
 	}
 }
 
 func TestMuxNestedNotFound(t *testing.T) {
 	r := NewRouter()
-	r.Get("/hi", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("bye"))
+	r.Get("/hi", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("bye"))
 	})
-	r.NotFound(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		w.Write([]byte("root 404"))
+	r.NotFound(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(404)
+		fctx.Write([]byte("root 404"))
 	})
 
 	sr1 := NewRouter()
-	sr1.Get("/sub", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("sub"))
+	sr1.Get("/sub", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("sub"))
 	})
-	sr1.NotFound(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		w.Write([]byte("sub 404"))
+	sr1.NotFound(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.SetStatusCode(404)
+		fctx.Write([]byte("sub 404"))
 	})
 
 	sr2 := NewRouter()
-	sr2.Get("/sub", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("sub2"))
+	sr2.Get("/sub", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("sub2"))
 	})
 
 	r.Mount("/admin1", sr1)
 	r.Mount("/admin2", sr2)
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
+	}
 
-	if resp := testRequest(t, ts, "GET", "/hi", nil); resp != "bye" {
+	if resp := testRequest(t, ts, "GET", "/hi"); resp != "bye" {
 		t.Fatalf(resp)
 	}
-	if resp := testRequest(t, ts, "GET", "/nothing-here", nil); resp != "root 404" {
+	if resp := testRequest(t, ts, "GET", "/nothing-here"); resp != "root 404" {
 		t.Fatalf(resp)
 	}
-	if resp := testRequest(t, ts, "GET", "/admin1/sub", nil); resp != "sub" {
+	if resp := testRequest(t, ts, "GET", "/admin1/sub"); resp != "sub" {
 		t.Fatalf(resp)
 	}
-	if resp := testRequest(t, ts, "GET", "/admin1/nope", nil); resp != "sub 404" {
+	if resp := testRequest(t, ts, "GET", "/admin1/nope"); resp != "sub 404" {
 		t.Fatalf(resp)
 	}
-	if resp := testRequest(t, ts, "GET", "/admin2/sub", nil); resp != "sub2" {
+	if resp := testRequest(t, ts, "GET", "/admin2/sub"); resp != "sub2" {
 		t.Fatalf(resp)
 	}
 
 	// Not found pages should bubble up to the root.
-	if resp := testRequest(t, ts, "GET", "/admin2/nope", nil); resp != "root 404" {
+	if resp := testRequest(t, ts, "GET", "/admin2/nope"); resp != "root 404" {
 		t.Fatalf(resp)
 	}
 
@@ -337,11 +406,11 @@ func TestMuxNestedNotFound(t *testing.T) {
 
 func TestMuxMiddlewareStack(t *testing.T) {
 	var stdmwInit, stdmwHandler uint64
-	stdmw := func(next http.Handler) http.Handler {
+	stdmw := func(next Handler) Handler {
 		stdmwInit++
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			stdmwHandler++
-			next.ServeHTTP(w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 	_ = stdmw
@@ -350,29 +419,29 @@ func TestMuxMiddlewareStack(t *testing.T) {
 	ctxmw := func(next Handler) Handler {
 		ctxmwInit++
 		// log.Println("INIT")
-		return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			ctxmwHandler++
 			ctx = context.WithValue(ctx, "count.ctxmwHandler", ctxmwHandler)
-			next.ServeHTTPC(ctx, w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 
 	var inCtxmwInit, inCtxmwHandler uint64
 	inCtxmw := func(next Handler) Handler {
 		inCtxmwInit++
-		return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			inCtxmwHandler++
-			next.ServeHTTPC(ctx, w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 
 	r := NewRouter()
 	r.Use(stdmw)
 	r.Use(ctxmw)
-	r.Use(func(next http.Handler) http.Handler {
+	r.Use(func(next Handler) Handler {
 		// log.Println("std, inline mw init")
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r)
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+			next.ServeHTTPC(ctx, fctx)
 		})
 	})
 	// r.Use(func(next http.Handler) http.Handler {
@@ -380,41 +449,42 @@ func TestMuxMiddlewareStack(t *testing.T) {
 	// 		next.ServeHTTP(w, r)
 	// 	})
 	// })
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/ping" {
-				w.Write([]byte("pong"))
+	r.Use(func(next Handler) Handler {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+			if string(fctx.Path()) == "/ping" {
+				fctx.Write([]byte("pong"))
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	})
 
 	var handlerCount uint64
-	r.Get("/", inCtxmw, func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	r.Get("/", inCtxmw, func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		handlerCount++
 		ctxmwHandlerCount := ctx.Value("count.ctxmwHandler").(uint64)
-		w.Write([]byte(fmt.Sprintf("inits:%d reqs:%d ctxValue:%d", ctxmwInit, handlerCount, ctxmwHandlerCount)))
+		fctx.Write([]byte(fmt.Sprintf("inits:%d reqs:%d ctxValue:%d", ctxmwInit, handlerCount, ctxmwHandlerCount)))
 	})
 
-	r.Get("/hi", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("wooot"))
+	r.Get("/hi", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("wooot"))
 	})
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
+	}
 
 	// log.Println("routes set.")
 
 	var resp string
-	resp = testRequest(t, ts, "GET", "/", nil)
-	resp = testRequest(t, ts, "GET", "/", nil)
-	resp = testRequest(t, ts, "GET", "/", nil)
+	resp = testRequest(t, ts, "GET", "/")
+	resp = testRequest(t, ts, "GET", "/")
+	resp = testRequest(t, ts, "GET", "/")
 	if resp != "inits:1 reqs:3 ctxValue:3" {
 		t.Fatalf("got: '%s'", resp)
 	}
 
-	resp = testRequest(t, ts, "GET", "/ping", nil)
+	resp = testRequest(t, ts, "GET", "/ping")
 	if resp != "pong" {
 		t.Fatalf("got: '%s'", resp)
 	}
@@ -422,12 +492,12 @@ func TestMuxMiddlewareStack(t *testing.T) {
 
 func TestMuxRootGroup(t *testing.T) {
 	var stdmwInit, stdmwHandler uint64
-	stdmw := func(next http.Handler) http.Handler {
+	stdmw := func(next Handler) Handler {
 		stdmwInit++
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			// log.Println("$$$$$ stdmw handlerfunc here!")
 			stdmwHandler++
-			next.ServeHTTP(w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	}
 	// stdmw := func(next Handler) Handler {
@@ -447,16 +517,17 @@ func TestMuxRootGroup(t *testing.T) {
 	// })
 	r.Group(func(r Router) {
 		r.Use(stdmw)
-		r.Get("/group", func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("root group"))
+		r.Get("/group", func(fctx *fasthttp.RequestCtx) {
+			fctx.Write([]byte("root group"))
 		})
 	})
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
+	}
 
 	// GET /group
-	resp := testRequest(t, ts, "GET", "/group", nil)
+	resp := testRequest(t, ts, "GET", "/group")
 	if resp != "root group" {
 		t.Fatalf("got: '%s'", resp)
 	}
@@ -469,94 +540,94 @@ func TestMuxBig(t *testing.T) {
 	var r, sr1, sr2, sr3, sr4, sr5, sr6 *Mux
 	r = NewRouter()
 	r.Use(func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			ctx = context.WithValue(ctx, "requestID", "1")
-			next.ServeHTTPC(ctx, w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	})
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	r.Use(func(next Handler) Handler {
+		return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			// log.Println("request:", r.URL.Path) // TODO: put in buffer..
-			next.ServeHTTP(w, r)
+			next.ServeHTTPC(ctx, fctx)
 		})
 	})
 	r.Group(func(r Router) {
 		r.Use(func(next Handler) Handler {
-			return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-				next.ServeHTTPC(ctx, w, r)
+			return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+				next.ServeHTTPC(ctx, fctx)
 			})
 		})
-		r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("fav"))
+		r.Get("/favicon.ico", func(fctx *fasthttp.RequestCtx) {
+			fctx.Write([]byte("fav"))
 		})
-		r.Get("/hubs/:hubID/view", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/hubs/:hubID/view", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			s := fmt.Sprintf("/hubs/%s/view reqid:%s", URLParam(ctx, "hubID"), ctx.Value("requestID"))
-			w.Write([]byte(s))
+			fctx.Write([]byte(s))
 		})
-		r.Get("/hubs/:hubID/view/*", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/hubs/:hubID/view/*", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			s := fmt.Sprintf("/hubs/%s/view/%s reqid:%s", URLParam(ctx, "hubID"), URLParam(ctx, "*"),
 				ctx.Value("requestID"))
-			w.Write([]byte(s))
+			fctx.Write([]byte(s))
 		})
 	})
 	r.Group(func(r Router) {
 		r.Use(func(next Handler) Handler {
-			return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+			return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 				ctx = context.WithValue(ctx, "session.user", "elvis")
-				next.ServeHTTPC(ctx, w, r)
+				next.ServeHTTPC(ctx, fctx)
 			})
 		})
-		r.Get("/", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			s := fmt.Sprintf("/ reqid:%s session:%s", ctx.Value("requestID"), ctx.Value("session.user"))
-			w.Write([]byte(s))
+			fctx.Write([]byte(s))
 		})
-		r.Get("/suggestions", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/suggestions", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			s := fmt.Sprintf("/suggestions reqid:%s session:%s", ctx.Value("requestID"), ctx.Value("session.user"))
-			w.Write([]byte(s))
+			fctx.Write([]byte(s))
 		})
 
-		r.Get("/woot/:wootID/*", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/woot/:wootID/*", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			s := fmt.Sprintf("/woot/%s/%s", URLParam(ctx, "wootID"), URLParam(ctx, "*"))
-			w.Write([]byte(s))
+			fctx.Write([]byte(s))
 		})
 
 		r.Route("/hubs", func(r Router) {
 			sr1 = r.(*Mux)
 			r.Route("/:hubID", func(r Router) {
 				sr2 = r.(*Mux)
-				r.Get("/", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+				r.Get("/", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 					s := fmt.Sprintf("/hubs/%s reqid:%s session:%s",
 						URLParam(ctx, "hubID"), ctx.Value("requestID"), ctx.Value("session.user"))
-					w.Write([]byte(s))
+					fctx.Write([]byte(s))
 				})
-				r.Get("/touch", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+				r.Get("/touch", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 					s := fmt.Sprintf("/hubs/%s/touch reqid:%s session:%s", URLParam(ctx, "hubID"),
 						ctx.Value("requestID"), ctx.Value("session.user"))
-					w.Write([]byte(s))
+					fctx.Write([]byte(s))
 				})
 
 				sr3 = NewRouter()
-				sr3.Get("/", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+				sr3.Get("/", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 					s := fmt.Sprintf("/hubs/%s/webhooks reqid:%s session:%s", URLParam(ctx, "hubID"),
 						ctx.Value("requestID"), ctx.Value("session.user"))
-					w.Write([]byte(s))
+					fctx.Write([]byte(s))
 				})
 				sr3.Route("/:webhookID", func(r Router) {
 					sr4 = r.(*Mux)
-					r.Get("/", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+					r.Get("/", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 						s := fmt.Sprintf("/hubs/%s/webhooks/%s reqid:%s session:%s", URLParam(ctx, "hubID"),
 							URLParam(ctx, "webhookID"), ctx.Value("requestID"), ctx.Value("session.user"))
-						w.Write([]byte(s))
+						fctx.Write([]byte(s))
 					})
 				})
 				r.Mount("/webhooks", sr3)
 
 				r.Route("/posts", func(r Router) {
 					sr5 = r.(*Mux)
-					r.Get("/", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+					r.Get("/", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 						s := fmt.Sprintf("/hubs/%s/posts reqid:%s session:%s", URLParam(ctx, "hubID"),
 							ctx.Value("requestID"), ctx.Value("session.user"))
-						w.Write([]byte(s))
+						fctx.Write([]byte(s))
 					})
 				})
 			})
@@ -564,15 +635,15 @@ func TestMuxBig(t *testing.T) {
 
 		r.Route("/folders/", func(r Router) {
 			sr6 = r.(*Mux)
-			r.Get("/", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+			r.Get("/", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 				s := fmt.Sprintf("/folders/ reqid:%s session:%s",
 					ctx.Value("requestID"), ctx.Value("session.user"))
-				w.Write([]byte(s))
+				fctx.Write([]byte(s))
 			})
-			r.Get("/public", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+			r.Get("/public", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 				s := fmt.Sprintf("/folders/public reqid:%s session:%s",
 					ctx.Value("requestID"), ctx.Value("session.user"))
-				w.Write([]byte(s))
+				fctx.Write([]byte(s))
 			})
 		})
 	})
@@ -607,85 +678,86 @@ func TestMuxBig(t *testing.T) {
 	// debugPrintTree(0, 0, sr6.router[mGET].root, 0)
 	// log.Println("")
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
+	}
 
 	var resp, expected string
 
-	resp = testRequest(t, ts, "GET", "/favicon.ico", nil)
+	resp = testRequest(t, ts, "GET", "/favicon.ico")
 	if resp != "fav" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/4/view", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/4/view")
 	if resp != "/hubs/4/view reqid:1" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/4/view/index.html", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/4/view/index.html")
 	if resp != "/hubs/4/view/index.html reqid:1" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/", nil)
+	resp = testRequest(t, ts, "GET", "/")
 	if resp != "/ reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/suggestions", nil)
+	resp = testRequest(t, ts, "GET", "/suggestions")
 	if resp != "/suggestions reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/woot/444/hiiii", nil)
+	resp = testRequest(t, ts, "GET", "/woot/444/hiiii")
 	if resp != "/woot/444/hiiii" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/123", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123")
 	expected = "/hubs/123 reqid:1 session:elvis"
 	if resp != expected {
 		t.Fatalf("expected:%s got:%s", expected, resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/123/touch", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123/touch")
 	if resp != "/hubs/123/touch reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/123/webhooks", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123/webhooks")
 	if resp != "/hubs/123/webhooks reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/123/posts", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123/posts")
 	if resp != "/hubs/123/posts reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/folders", nil)
-	if resp != "404 page not found\n" {
+	resp = testRequest(t, ts, "GET", "/folders")
+	if resp != "404 Page not found" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/folders/", nil)
+	resp = testRequest(t, ts, "GET", "/folders/")
 	if resp != "/folders/ reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/folders/public", nil)
+	resp = testRequest(t, ts, "GET", "/folders/public")
 	if resp != "/folders/public reqid:1 session:elvis" {
 		t.Fatalf("got '%s'", resp)
 	}
-	resp = testRequest(t, ts, "GET", "/folders/nothing", nil)
-	if resp != "404 page not found\n" {
+	resp = testRequest(t, ts, "GET", "/folders/nothing")
+	if resp != "404 Page not found" {
 		t.Fatalf("got '%s'", resp)
 	}
 }
 
 func TestMuxSubroutes(t *testing.T) {
-	hHubView1 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hub1"))
+	hHubView1 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("hub1"))
 	})
-	hHubView2 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hub2"))
+	hHubView2 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("hub2"))
 	})
-	hHubView3 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hub3"))
+	hHubView3 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("hub3"))
 	})
-	hAccountView1 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("account1"))
+	hAccountView1 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("account1"))
 	})
-	hAccountView2 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("account2"))
+	hAccountView2 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("account2"))
 	})
 
 	r := NewRouter()
@@ -733,115 +805,93 @@ func TestMuxSubroutes(t *testing.T) {
 	// log.Println("")
 	// log.Println("")
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
+	}
 
 	var resp, expected string
 
-	resp = testRequest(t, ts, "GET", "/hubs/123/view", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123/view")
 	expected = "hub1"
 	if resp != expected {
 		t.Fatalf("expected:%s got:%s", expected, resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/123/view/index.html", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123/view/index.html")
 	expected = "hub2"
 	if resp != expected {
 		t.Fatalf("expected:%s got:%s", expected, resp)
 	}
-	resp = testRequest(t, ts, "GET", "/hubs/123/users", nil)
+	resp = testRequest(t, ts, "GET", "/hubs/123/users")
 	expected = "hub3"
 	if resp != expected {
 		t.Fatalf("expected:%s got:%s", expected, resp)
 	}
-	resp = testRequest(t, ts, "GET", "/accounts/44", nil)
+	resp = testRequest(t, ts, "GET", "/accounts/44")
 	expected = "account1"
 	if resp != expected {
 		t.Fatalf("request:%s expected:%s got:%s", "GET /accounts/44", expected, resp)
 	}
-	resp = testRequest(t, ts, "GET", "/accounts/44/hi", nil)
+	resp = testRequest(t, ts, "GET", "/accounts/44/hi")
 	expected = "account2"
 	if resp != expected {
 		t.Fatalf("expected:%s got:%s", expected, resp)
 	}
 }
 
+func catchPanic(testFunc func()) (recv interface{}) {
+	defer func() {
+		recv = recover()
+	}()
+
+	testFunc()
+	return
+}
+
 func TestMuxFileServer(t *testing.T) {
-	fixtures := map[string]http.File{
-		"index.html": &testFile{"index.html", []byte("index\n")},
-		"ok":         &testFile{"ok", []byte("ok\n")},
-	}
-
-	memfs := &testFileSystem{func(name string) (http.File, error) {
-		name = name[1:]
-		// if name == "" {
-		// 	name = "index.html"
-		// }
-		if f, ok := fixtures[name]; ok {
-			return f, nil
-		}
-		return nil, errors.New("file not found")
-	}}
-
 	r := NewRouter()
-	r.FileServer("/mounted", memfs)
-	r.Get("/hi", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("bye"))
+
+	recv := catchPanic(func() {
+		r.FileServer("/noFilepath", os.TempDir())
 	})
-	r.NotFound(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(404)
-		w.Write([]byte("nothing here"))
-	})
-	r.FileServer("/", memfs)
+	if recv == nil {
+		t.Fatal("registering path not ending with '*filepath' did not panic")
+	}
+	body := []byte("fake ico")
+	ioutil.WriteFile(os.TempDir()+"/favicon.ico", body, 0644)
 
-	ts := httptest.NewServer(r)
-	defer ts.Close()
+	r.FileServer("/*filepath", os.TempDir())
 
-	if resp := testRequest(t, ts, "GET", "/hi", nil); resp != "bye" {
-		t.Fatalf(resp)
+	ts := &fasthttp.Server{
+		Handler: r.ServeHTTP,
 	}
 
-	// HEADS UP: net/http notfoundhandler will kick-in for static assets
-	if resp := testRequest(t, ts, "GET", "/mounted/nothing-here", nil); resp == "nothing here" {
-		t.Fatalf(resp)
+	rw := &readWriter{}
+	ch := make(chan error)
+
+	rw.r.WriteString(string("GET /favicon.ico HTTP/1.1\r\n\r\n"))
+	go func() {
+		ch <- ts.ServeConn(rw)
+	}()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Fatalf("return error %s", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timeout")
 	}
 
-	if resp := testRequest(t, ts, "GET", "/nothing-here", nil); resp == "nothing here" {
-		t.Fatalf(resp)
+	br := bufio.NewReader(&rw.w)
+	var resp fasthttp.Response
+	if err := resp.Read(br); err != nil {
+		t.Fatalf("Unexpected error when reading response: %s", err)
 	}
-
-	if resp := testRequest(t, ts, "GET", "/mounted-nothing-here", nil); resp == "nothing here" {
-		t.Fatalf(resp)
+	if resp.Header.StatusCode() != 200 {
+		t.Fatalf("Unexpected status code %d. Expected %d", resp.Header.StatusCode(), 423)
 	}
-
-	if resp := testRequest(t, ts, "GET", "/hi", nil); resp != "bye" {
-		t.Fatalf(resp)
+	if !bytes.Equal(resp.Body(), body) {
+		t.Fatalf("Unexpected body %q. Expected %q", resp.Body(), string(body))
 	}
-
-	if resp := testRequest(t, ts, "GET", "/ok", nil); resp != "ok\n" {
-		t.Fatalf(resp)
-	}
-
-	if resp := testRequest(t, ts, "GET", "/mounted/ok", nil); resp != "ok\n" {
-		t.Fatalf(resp)
-	}
-
-	// TODO/FIX: testFileSystem mock struct.. it struggles to pass this since it gets
-	// into a redirect loop, however, it does work with http.Dir() using the disk.
-	// if resp := testRequest(t, ts, "GET", "/index.html", nil); resp != "index\n" {
-	// 	t.Fatalf(resp)
-	// }
-
-	// if resp := testRequest(t, ts, "GET", "/", nil); resp != "index\n" {
-	// 	t.Fatalf(resp)
-	// }
-
-	// if resp := testRequest(t, ts, "GET", "/mounted", nil); resp != "index\n" {
-	// 	t.Fatalf(resp)
-	// }
-
-	// if resp := testRequest(t, ts, "GET", "/mounted/", nil); resp != "index\n" {
-	// 	t.Fatalf(resp)
-	// }
 }
 
 func urlParams(ctx context.Context) map[string]string {
@@ -855,72 +905,29 @@ func urlParams(ctx context.Context) map[string]string {
 	return nil
 }
 
-func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io.Reader) string {
-	req, err := http.NewRequest(method, ts.URL+path, body)
-	if err != nil {
+func testRequest(t *testing.T, ts *fasthttp.Server, method, path string) string {
+	rw := &readWriter{}
+	ch := make(chan error)
+
+	rw.r.WriteString(method + " " + path + " HTTP/1.1\r\n\r\n")
+	go func() {
+		ch <- ts.ServeConn(rw)
+	}()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Fatal(err)
+			return ""
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("timeout")
+		return ""
+	}
+	br := bufio.NewReader(&rw.w)
+	var resp fasthttp.Response
+	if err := resp.Read(br); err != nil {
 		t.Fatal(err)
 		return ""
 	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-		return ""
-	}
-
-	respBody, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-		return ""
-	}
-	defer resp.Body.Close()
-
-	return string(respBody)
+	return string(resp.Body())
 }
-
-type testFileSystem struct {
-	open func(name string) (http.File, error)
-}
-
-func (fs *testFileSystem) Open(name string) (http.File, error) {
-	return fs.open(name)
-}
-
-type testFile struct {
-	name     string
-	contents []byte
-}
-
-func (tf *testFile) Close() error {
-	return nil
-}
-
-func (tf *testFile) Read(p []byte) (n int, err error) {
-	copy(p, tf.contents)
-	return len(p), nil
-}
-
-func (tf *testFile) Seek(offset int64, whence int) (int64, error) {
-	return 0, nil
-}
-
-func (tf *testFile) Readdir(count int) ([]os.FileInfo, error) {
-	stat, _ := tf.Stat()
-	return []os.FileInfo{stat}, nil
-}
-
-func (tf *testFile) Stat() (os.FileInfo, error) {
-	return &testFileInfo{tf.name, int64(len(tf.contents))}, nil
-}
-
-type testFileInfo struct {
-	name string
-	size int64
-}
-
-func (tfi *testFileInfo) Name() string       { return tfi.name }
-func (tfi *testFileInfo) Size() int64        { return tfi.size }
-func (tfi *testFileInfo) Mode() os.FileMode  { return 0755 }
-func (tfi *testFileInfo) ModTime() time.Time { return time.Now() }
-func (tfi *testFileInfo) IsDir() bool        { return false }
-func (tfi *testFileInfo) Sys() interface{}   { return nil }

@@ -6,10 +6,11 @@ package middleware
 import (
 	"bytes"
 	"log"
-	"net/http"
 	"runtime/debug"
 
-	"github.com/pressly/chi"
+	"github.com/valyala/fasthttp"
+
+	"bitbucket.org/gle/chi"
 	"golang.org/x/net/context"
 )
 
@@ -19,18 +20,15 @@ import (
 //
 // Recoverer prints a request ID if one is provided.
 func Recoverer(next chi.Handler) chi.Handler {
-	fn := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	fn := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		defer func() {
 			if err := recover(); err != nil {
-				reqID := GetReqID(ctx)
-				prefix := requestPrefix(reqID, r)
-				printPanic(prefix, reqID, err)
 				debug.PrintStack()
-				http.Error(w, http.StatusText(500), 500)
+				fctx.Error("Internal Server Error", fasthttp.StatusInternalServerError)
 			}
 		}()
 
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	}
 
 	return chi.HandlerFunc(fn)

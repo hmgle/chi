@@ -2,8 +2,10 @@ package chi
 
 import (
 	"fmt"
-	"net/http"
+	"strings"
 	"sync"
+
+	"github.com/valyala/fasthttp"
 
 	"golang.org/x/net/context"
 )
@@ -156,12 +158,24 @@ func (mx *Mux) NotFound(h HandlerFunc) {
 	mx.router.notFoundHandler = &h
 }
 
-// FileServer conveniently sets up a http.FileServer handler to serve
-// static files from a http.FileSystem.
-func (mx *Mux) FileServer(path string, root http.FileSystem) {
-	fs := http.StripPrefix(path, http.FileServer(root))
-	mx.Get(path+"*", func(w http.ResponseWriter, r *http.Request) {
-		fs.ServeHTTP(w, r)
+// FileServer serves files from the given file system root.
+// The path must end with "/*filepath", files are then served from the local
+// path /defined/root/dir/*filepath.
+// For example if root is "/etc" and *filepath is "passwd", the local file
+// "/etc/passwd" would be served.
+// Internally a http.FileServer is used, therefore http.NotFound is used instead
+// of the Router's NotFound handler.
+//     router.FileServer("/src/*filepath", "/var/www")
+func (mx *Mux) FileServer(path, root string) {
+	if len(path) < 10 || path[len(path)-10:] != "/*filepath" {
+		panic("path must end with /*filepath in path '" + path + "'")
+	}
+	prefix := path[:len(path)-10]
+
+	fileHandler := fasthttp.FSHandler(root, strings.Count(prefix, "/"))
+
+	mx.Get(path, func(fctx *fasthttp.RequestCtx) {
+		fileHandler(fctx)
 	})
 }
 
@@ -246,10 +260,10 @@ func (mx *Mux) Mount(path string, handlers ...interface{}) {
 	}
 
 	// Wrap the sub-router in a handlerFunc to scope the request path for routing.
-	subHandler := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	subHandler := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		rctx := RouteContext(ctx)
 		rctx.RoutePath = "/" + rctx.Params.Del("*")
-		h.ServeHTTPC(ctx, w, r)
+		h.ServeHTTPC(ctx, fctx)
 	})
 
 	if path == "" || path[len(path)-1] != '/' {
@@ -263,17 +277,17 @@ func (mx *Mux) Mount(path string, handlers ...interface{}) {
 // ServeHTTP is the single method of the http.Handler interface that makes
 // Mux interoperable with the standard library. It uses a sync.Pool to get and
 // reuse routing contexts for each request.
-func (mx *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (mx *Mux) ServeHTTP(fctx *fasthttp.RequestCtx) {
 	ctx := mx.pool.Get().(*Context)
-	mx.ServeHTTPC(ctx, w, r)
+	mx.ServeHTTPC(ctx, fctx)
 	ctx.reset()
 	mx.pool.Put(ctx)
 }
 
 // ServeHTTPC is chi's Handler method that adds a context.Context argument to the
 // standard ServeHTTP handler function.
-func (mx *Mux) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	mx.handler.ServeHTTPC(ctx, w, r)
+func (mx *Mux) ServeHTTPC(ctx context.Context, fctx *fasthttp.RequestCtx) {
+	mx.handler.ServeHTTPC(ctx, fctx)
 }
 
 // A treeRouter manages a radix trie prefix-router for each HTTP method and passes
@@ -304,13 +318,13 @@ func (tr treeRouter) NotFoundHandlerFn() HandlerFunc {
 	if tr.notFoundHandler != nil {
 		return *tr.notFoundHandler
 	}
-	return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
+	return HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.NotFound()
 	})
 }
 
 // ServeHTTPC is the main routing method for each request.
-func (tr treeRouter) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (tr treeRouter) ServeHTTPC(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	// Grab the root context object
 	rctx, _ := ctx.(*Context)
 	if rctx == nil {
@@ -323,13 +337,13 @@ func (tr treeRouter) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *h
 	// The request path
 	routePath := rctx.RoutePath
 	if routePath == "" {
-		routePath = r.URL.Path
+		routePath = string(fctx.Path())
 	}
 
 	// Check if method is supported by chi
-	method, ok := methodMap[r.Method]
+	method, ok := methodMap[string(fctx.Method())]
 	if !ok {
-		methodNotAllowedHandler(ctx, w, r)
+		methodNotAllowedHandler(ctx, fctx)
 		return
 	}
 
@@ -337,10 +351,10 @@ func (tr treeRouter) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *h
 	cxh := tr.routes[method].Find(rctx, routePath)
 
 	if cxh == nil {
-		tr.NotFoundHandlerFn().ServeHTTPC(ctx, w, r)
+		tr.NotFoundHandlerFn().ServeHTTPC(ctx, fctx)
 		return
 	}
 
 	// Serve it
-	cxh.ServeHTTPC(ctx, w, r)
+	cxh.ServeHTTPC(ctx, fctx)
 }

@@ -3,9 +3,10 @@ package chi
 import (
 	"fmt"
 	"log"
-	"net/http"
 	"reflect"
 	"testing"
+
+	"github.com/valyala/fasthttp"
 
 	"golang.org/x/net/context"
 )
@@ -15,27 +16,27 @@ var (
 )
 
 func TestTree(t *testing.T) {
-	hStub := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hIndex := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hFavicon := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleList := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleNear := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleShow := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleShowRelated := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleShowOpts := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleSlug := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hArticleByUser := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hUserList := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hUserShow := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hAdminCatchall := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hAdminAppShow := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hAdminAppShowCatchall := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hUserProfile := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hUserSuper := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hUserAll := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hHubView1 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hHubView2 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	hHubView3 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
+	hStub := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hIndex := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hFavicon := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleList := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleNear := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleShow := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleShowRelated := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleShowOpts := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleSlug := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hArticleByUser := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hUserList := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hUserShow := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hAdminCatchall := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hAdminAppShow := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hAdminAppShowCatchall := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hUserProfile := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hUserSuper := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hUserAll := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hHubView1 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hHubView2 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	hHubView3 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
 
 	tr := &tree{root: &node{}}
 
@@ -179,8 +180,8 @@ func debugPrintTree(parent int, i int, n *node, label byte) bool {
 }
 
 func BenchmarkTreeGet(b *testing.B) {
-	h1 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
-	h2 := HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {})
+	h1 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
+	h2 := HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {})
 
 	tr := &tree{root: &node{}}
 	tr.Insert("/", h1)

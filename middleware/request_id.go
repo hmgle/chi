@@ -7,12 +7,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
 
-	"github.com/pressly/chi"
+	"bitbucket.org/gle/chi"
+	"github.com/valyala/fasthttp"
 	"golang.org/x/net/context"
 )
 
@@ -63,10 +63,10 @@ func init() {
 // process, and where the last number is an atomically incremented request
 // counter.
 func RequestID(next chi.Handler) chi.Handler {
-	fn := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	fn := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		myid := atomic.AddUint64(&reqid, 1)
 		ctx = context.WithValue(ctx, RequestIDKey, fmt.Sprintf("%s-%06d", prefix, myid))
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	}
 	return chi.HandlerFunc(fn)
 }

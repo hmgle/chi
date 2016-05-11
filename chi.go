@@ -1,7 +1,7 @@
 package chi
 
 import (
-	"net/http"
+	"github.com/valyala/fasthttp"
 
 	"golang.org/x/net/context"
 )
@@ -20,7 +20,6 @@ func NewRouter(parent ...context.Context) *Mux {
 // interface, and the Router argument types will be http.Handler instead
 // of interface{}.
 type Router interface {
-	http.Handler
 	Handler
 
 	Use(middlewares ...interface{})
@@ -45,21 +44,21 @@ type Router interface {
 // Handler is like net/http's http.Handler, but also includes a
 // mechanism for serving requests with a context.
 type Handler interface {
-	ServeHTTPC(context.Context, http.ResponseWriter, *http.Request)
+	ServeHTTPC(context.Context, *fasthttp.RequestCtx)
 }
 
 // HandlerFunc is like net/http's http.HandlerFunc, but supports a context
 // object.
-type HandlerFunc func(context.Context, http.ResponseWriter, *http.Request)
+type HandlerFunc func(context.Context, *fasthttp.RequestCtx)
 
 // ServeHTTPC wraps ServeHTTP with a context parameter.
-func (h HandlerFunc) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	h(ctx, w, r)
+func (h HandlerFunc) ServeHTTPC(ctx context.Context, fctx *fasthttp.RequestCtx) {
+	h(ctx, fctx)
 }
 
 // ServeHTTP provides compatibility with http.Handler.
-func (h HandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h(context.Background(), w, r)
+func (h HandlerFunc) ServeHTTP(fctx *fasthttp.RequestCtx) {
+	h(context.Background(), fctx)
 }
 
 // RouteContext returns chi's routing context object that holds url params

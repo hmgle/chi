@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"net/http"
 
 	"github.com/pressly/chi"
 	"github.com/pressly/chi/middleware"
+	"github.com/valyala/fasthttp"
+
 	"golang.org/x/net/context"
 )
 
@@ -13,14 +14,14 @@ func main() {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	// r.Use(middleware.RealIP)
+	// r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
 	r.Use(func(h chi.Handler) chi.Handler {
-		return chi.HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		return chi.HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			ctx = context.WithValue(ctx, "example", true)
-			h.ServeHTTPC(ctx, w, r)
+			h.ServeHTTPC(ctx, fctx)
 		})
 	})
 
@@ -28,7 +29,7 @@ func main() {
 
 	r.Mount("/accounts", accountsRouter())
 
-	http.ListenAndServe(":3333", r)
+	fasthttp.ListenAndServe(":3333", r.ServeHTTP)
 }
 
 func accountsRouter() chi.Router { // or http.Handler
@@ -43,15 +44,15 @@ func accountsRouter() chi.Router { // or http.Handler
 	r.Group(func(r chi.Router) {
 		r.Use(sup2)
 
-		r.Get("/hi2", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/hi2", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			v := ctx.Value("sup2").(string)
-			w.Write([]byte(fmt.Sprintf("hi2 - '%s'", v)))
+			fctx.Write([]byte(fmt.Sprintf("hi2 - '%s'", v)))
 		})
-		r.Get("/ahh", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/ahh", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			v := ctx.Value("sup2").(string)
-			w.Write([]byte(fmt.Sprintf("ahh - '%s'", v)))
+			fctx.Write([]byte(fmt.Sprintf("ahh - '%s'", v)))
 		})
-		r.Get("/fail", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/fail", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			panic("no..")
 		})
 	})
@@ -67,57 +68,57 @@ func accountsRouter() chi.Router { // or http.Handler
 }
 
 func sup1(next chi.Handler) chi.Handler {
-	hfn := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	hfn := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		ctx = context.WithValue(ctx, "sup1", "sup1")
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	}
 	return chi.HandlerFunc(hfn)
 }
 
 func sup2(next chi.Handler) chi.Handler {
-	hfn := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	hfn := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		ctx = context.WithValue(ctx, "sup2", "sup2")
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	}
 	return chi.HandlerFunc(hfn)
 }
 
 func accountCtx(h chi.Handler) chi.Handler {
-	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	handler := func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		ctx = context.WithValue(ctx, "account", "account 123")
-		h.ServeHTTPC(ctx, w, r)
+		h.ServeHTTPC(ctx, fctx)
 	}
 	return chi.HandlerFunc(handler)
 }
 
-func apiIndex(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("root"))
+func apiIndex(ctx context.Context, fctx *fasthttp.RequestCtx) {
+	fctx.Write([]byte("root"))
 }
 
-func listAccounts(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("list accounts"))
+func listAccounts(ctx context.Context, fctx *fasthttp.RequestCtx) {
+	fctx.Write([]byte("list accounts"))
 }
 
-func hiAccounts(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func hiAccounts(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	sup1 := ctx.Value("sup1").(string)
-	w.Write([]byte(fmt.Sprintf("hi accounts %v", sup1)))
+	fctx.Write([]byte(fmt.Sprintf("hi accounts %v", sup1)))
 }
 
-func createAccount(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("create account"))
+func createAccount(fctx *fasthttp.RequestCtx) {
+	fctx.Write([]byte("create account"))
 }
 
-func getAccount(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func getAccount(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	accountID := chi.URLParam(ctx, "accountID")
 	account := ctx.Value("account").(string)
-	w.Write([]byte(fmt.Sprintf("get account id:%s details:%s", accountID, account)))
+	fctx.Write([]byte(fmt.Sprintf("get account id:%s details:%s", accountID, account)))
 }
 
-func updateAccount(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func updateAccount(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	account := ctx.Value("account").(string)
-	w.Write([]byte(fmt.Sprintf("update account:%s", account)))
+	fctx.Write([]byte(fmt.Sprintf("update account:%s", account)))
 }
 
-func other(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("catch all.."))
+func other(fctx *fasthttp.RequestCtx) {
+	fctx.Write([]byte("catch all.."))
 }
