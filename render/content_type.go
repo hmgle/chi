@@ -1,10 +1,10 @@
 package render
 
 import (
-	"net/http"
 	"strings"
 
 	"github.com/pressly/chi"
+	"github.com/valyala/fasthttp"
 	"golang.org/x/net/context"
 )
 
@@ -20,11 +20,11 @@ const (
 )
 
 func ParseContentType(next chi.Handler) chi.Handler {
-	return chi.HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	return chi.HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		var contentType ContentType
 
 		// Parse request Accept header.
-		fields := strings.Split(r.Header.Get("Accept"), ",")
+		fields := strings.Split(string(fctx.Request.Header.Peek("Accept")), ",")
 		if len(fields) > 0 {
 			switch strings.TrimSpace(fields[0]) {
 			case "text/plain":
@@ -42,12 +42,14 @@ func ParseContentType(next chi.Handler) chi.Handler {
 			}
 		}
 
+		// TODO
 		// Explicitly requested stream.
-		if _, ok := r.URL.Query()["stream"]; ok {
+		// if _, ok := r.URL.Query()["stream"]; ok {
+		if fctx.URI().QueryArgs().Peek("stream") != nil {
 			contentType = ContentTypeEventStream
 		}
 
 		ctx = context.WithValue(ctx, "contentType", contentType)
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	})
 }

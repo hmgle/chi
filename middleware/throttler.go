@@ -1,10 +1,10 @@
 package middleware
 
 import (
-	"net/http"
 	"time"
 
-	"github.com/pressly/chi"
+	"bitbucket.org/gle/chi"
+	"github.com/valyala/fasthttp"
 	"golang.org/x/net/context"
 )
 
@@ -70,10 +70,10 @@ type throttler struct {
 }
 
 // ServeHTTPC implements chi.Handler interface.
-func (t *throttler) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (t *throttler) ServeHTTPC(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	select {
 	case <-ctx.Done():
-		http.Error(w, errContextCanceled, http.StatusServiceUnavailable)
+		fctx.Error(errContextCanceled, fasthttp.StatusServiceUnavailable)
 		return
 	case btok := <-t.backlogTokens:
 		timer := time.NewTimer(t.backlogTimeout)
@@ -84,20 +84,21 @@ func (t *throttler) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *ht
 
 		select {
 		case <-timer.C:
-			http.Error(w, errTimedOut, http.StatusServiceUnavailable)
+			fctx.Error(errTimedOut, fasthttp.StatusServiceUnavailable)
 			return
 		case <-ctx.Done():
-			http.Error(w, errContextCanceled, http.StatusServiceUnavailable)
+			fctx.Error(errContextCanceled, fasthttp.StatusServiceUnavailable)
 			return
 		case tok := <-t.tokens:
 			defer func() {
 				t.tokens <- tok
 			}()
-			t.h.ServeHTTPC(ctx, w, r)
+			// t.h.ServeHTTPC(ctx, w, r)
+			t.h.ServeHTTPC(ctx, fctx)
 		}
 		return
 	default:
-		http.Error(w, errCapacityExceeded, http.StatusServiceUnavailable)
+		fctx.Error(errCapacityExceeded, fasthttp.StatusServiceUnavailable)
 		return
 	}
 }

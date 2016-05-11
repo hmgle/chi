@@ -2,8 +2,9 @@ package chi
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
+
+	"github.com/valyala/fasthttp"
 
 	"golang.org/x/net/context"
 )
@@ -28,15 +29,11 @@ func chain(middlewares []interface{}, handlers ...interface{}) Handler {
 		panic(fmt.Sprintf("chi: unsupported handler signature: %T", t))
 	case Handler:
 		cxh = t
-	case func(context.Context, http.ResponseWriter, *http.Request):
+	case func(context.Context, *fasthttp.RequestCtx):
 		cxh = HandlerFunc(t)
-	case http.Handler:
-		cxh = HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-			t.ServeHTTP(w, r)
-		})
-	case func(http.ResponseWriter, *http.Request):
-		cxh = HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-			t(w, r)
+	case func(*fasthttp.RequestCtx):
+		cxh = HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+			t(fctx)
 		})
 	}
 
@@ -63,16 +60,6 @@ func mwrap(middleware interface{}) func(Handler) Handler {
 
 	case func(Handler) Handler:
 		return mw
-
-	case func(http.Handler) http.Handler:
-		return func(next Handler) Handler {
-			return HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-				wfn := func(w http.ResponseWriter, r *http.Request) {
-					next.ServeHTTPC(ctx, w, r)
-				}
-				mw(http.HandlerFunc(wfn)).ServeHTTP(w, r)
-			})
-		}
 	}
 }
 
@@ -81,7 +68,6 @@ func assertMiddleware(middleware interface{}) interface{} {
 	switch t := middleware.(type) {
 	default:
 		panic(fmt.Sprintf("chi: unsupported middleware signature: %T", t))
-	case func(http.Handler) http.Handler:
 	case func(Handler) Handler:
 	}
 	return middleware
@@ -89,7 +75,7 @@ func assertMiddleware(middleware interface{}) interface{} {
 
 // Respond with just the allowed methods, as required by RFC2616 for
 // 405 Method not allowed.
-func methodNotAllowedHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func methodNotAllowedHandler(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	methods := make([]string, len(methodMap))
 	i := 0
 	for m := range methodMap {
@@ -97,7 +83,7 @@ func methodNotAllowedHandler(ctx context.Context, w http.ResponseWriter, r *http
 		i++
 	}
 
-	w.Header().Add("Allow", strings.Join(methods, ","))
-	w.WriteHeader(405)
-	w.Write([]byte(http.StatusText(405)))
+	fctx.Response.Header.Add("Allow", strings.Join(methods, ","))
+	fctx.SetStatusCode(405)
+	fctx.Write([]byte("Method Not Allowed"))
 }

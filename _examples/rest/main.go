@@ -3,14 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
-	"net/http"
 	"time"
 
 	"github.com/pressly/chi"
 	"github.com/pressly/chi/middleware"
 	"github.com/pressly/chi/render"
+	"github.com/valyala/fasthttp"
+
 	"golang.org/x/net/context"
 )
 
@@ -18,30 +18,31 @@ func main() {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.Logger)
+	// r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("..."))
+	r.Get("/", func(fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("..."))
 	})
 
-	r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("pong"))
+	r.Get("/ping", func(fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("pong"))
 	})
 
-	r.Get("/panic", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/panic", func(fctx *fasthttp.RequestCtx) {
 		panic("test")
 	})
 
 	// Slow handlers/operations.
 	r.Group(func(r chi.Router) {
 		// Stop processing when client disconnects.
-		r.Use(middleware.CloseNotify)
+		// TODO
+		// r.Use(middleware.CloseNotify)
 
 		// Stop processing after 2.5 seconds.
 		r.Use(middleware.Timeout(2500 * time.Millisecond))
 
-		r.Get("/slow", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/slow", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			rand.Seed(time.Now().Unix())
 
 			// Processing will take 1-5 seconds.
@@ -55,7 +56,7 @@ func main() {
 				// The above channel simulates some hard work.
 			}
 
-			w.Write([]byte(fmt.Sprintf("Processed in %v seconds\n", processTime)))
+			fctx.Write([]byte(fmt.Sprintf("Processed in %v seconds\n", processTime)))
 		})
 	})
 
@@ -67,15 +68,15 @@ func main() {
 		// Only one request will be processed at a time.
 		r.Use(middleware.Throttle(1))
 
-		r.Get("/throttled", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		r.Get("/throttled", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 			select {
 			case <-ctx.Done():
 				switch ctx.Err() {
 				case context.DeadlineExceeded:
-					w.WriteHeader(504)
-					w.Write([]byte("Processing too slow\n"))
+					fctx.SetStatusCode(504)
+					fctx.Write([]byte("Processing too slow\n"))
 				default:
-					w.Write([]byte("Canceled\n"))
+					fctx.Write([]byte("Canceled\n"))
 				}
 				return
 
@@ -83,7 +84,7 @@ func main() {
 				// The above channel simulates some hard work.
 			}
 
-			w.Write([]byte("Processed\n"))
+			fctx.Write([]byte("Processed\n"))
 		})
 	})
 
@@ -103,7 +104,7 @@ func main() {
 	// Mount the admin sub-router
 	r.Mount("/admin", adminRouter())
 
-	http.ListenAndServe(":3333", r)
+	fasthttp.ListenAndServe(":3333", r.ServeHTTP)
 }
 
 type Article struct {
@@ -112,73 +113,63 @@ type Article struct {
 }
 
 func ArticleCtx(next chi.Handler) chi.Handler {
-	return chi.HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	return chi.HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		articleID := chi.URLParam(ctx, "articleID")
 		article, err := dbGetArticle(articleID)
 		if err != nil {
-			http.Error(w, http.StatusText(404), 404)
+			fctx.Error("Not Found", 404)
 			return
 		}
 		ctx = context.WithValue(ctx, "article", article)
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	})
 }
 
-func listArticles(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("list of articles.."))
+func listArticles(ctx context.Context, fctx *fasthttp.RequestCtx) {
+	fctx.Write([]byte("list of articles.."))
 	// or render.Data(w, 200, []byte("list of articles.."))
 }
 
-func createArticle(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func createArticle(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	var article *Article
 
 	// btw, you could do this body reading / marhsalling in a nice bind middleware
-	data, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), 422)
-		return
-	}
-	defer r.Body.Close()
+	data := fctx.PostBody()
 
 	if err := json.Unmarshal(data, &article); err != nil {
-		http.Error(w, err.Error(), 422)
+		fctx.Error(err.Error(), 422)
 		return
 	}
 
 	// should really send back the json marshalled new article.
 	// build your own responder :)
-	w.Write([]byte(article.Title))
+	fctx.Write([]byte(article.Title))
 }
 
-func getArticle(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func getArticle(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	article, ok := ctx.Value("article").(*Article)
 	if !ok {
-		http.Error(w, http.StatusText(422), 422)
+		fctx.Error("Unprocessable Entity", 422)
 		return
 	}
 
 	// Build your own responder, see the "./render" pacakge as a starting
 	// point for your own.
-	render.JSON(w, 200, article)
+	render.JSON(fctx, 200, article)
 
 	// or..
 	// w.Write([]byte(fmt.Sprintf("title:%s", article.Title)))
 }
 
-func updateArticle(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func updateArticle(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	article, ok := ctx.Value("article").(*Article)
 	if !ok {
-		http.Error(w, http.StatusText(404), 404)
+		fctx.Error("Not Found", 404)
 		return
 	}
 
 	// btw, you could do this body reading / marhsalling in a nice bind middleware
-	data, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), 422)
-		return
-	}
-	defer r.Body.Close()
+	data := fctx.PostBody()
 
 	uArticle := struct {
 		*Article
@@ -186,23 +177,23 @@ func updateArticle(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 	}{Article: article}
 
 	if err := json.Unmarshal(data, &uArticle); err != nil {
-		http.Error(w, err.Error(), 422)
+		fctx.Error("Unprocessable Entity", 422)
 		return
 	}
 
-	render.JSON(w, 200, uArticle)
+	render.JSON(fctx, 200, uArticle)
 
 	// w.Write([]byte(fmt.Sprintf("updated article, title:%s", uArticle.Title)))
 }
 
-func deleteArticle(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func deleteArticle(ctx context.Context, fctx *fasthttp.RequestCtx) {
 	article, ok := ctx.Value("article").(*Article)
 	if !ok {
-		http.Error(w, http.StatusText(422), 422)
+		fctx.Error("Unprocessable Entity", 422)
 		return
 	}
 	_ = article // delete the article from the data store..
-	w.WriteHeader(204)
+	fctx.SetStatusCode(204)
 }
 
 func dbGetArticle(id string) (*Article, error) {
@@ -211,36 +202,36 @@ func dbGetArticle(id string) (*Article, error) {
 }
 
 func paginate(next chi.Handler) chi.Handler {
-	return chi.HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	return chi.HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		// just a stub.. some ideas are to look at URL query params for something like
 		// the page number, or the limit, and send a query cursor down the chain
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	})
 }
 
 // A completely separate router for administrator routes
-func adminRouter() http.Handler { // or chi.Router {
+func adminRouter() chi.Handler { // or chi.Router {
 	r := chi.NewRouter()
 	r.Use(AdminOnly)
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("admin: index"))
+	r.Get("/", func(fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("admin: index"))
 	})
-	r.Get("/accounts", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("admin: list accounts.."))
+	r.Get("/accounts", func(fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte("admin: list accounts.."))
 	})
-	r.Get("/users/:userId", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(fmt.Sprintf("admin: view user id %v", chi.URLParam(ctx, "userId"))))
+	r.Get("/users/:userId", func(ctx context.Context, fctx *fasthttp.RequestCtx) {
+		fctx.Write([]byte(fmt.Sprintf("admin: view user id %v", chi.URLParam(ctx, "userId"))))
 	})
 	return r
 }
 
 func AdminOnly(next chi.Handler) chi.Handler {
-	return chi.HandlerFunc(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	return chi.HandlerFunc(func(ctx context.Context, fctx *fasthttp.RequestCtx) {
 		isAdmin, ok := ctx.Value("acl.admin").(bool)
 		if !ok || !isAdmin {
-			http.Error(w, http.StatusText(403), 403)
+			fctx.Error("Forbidden", 403)
 			return
 		}
-		next.ServeHTTPC(ctx, w, r)
+		next.ServeHTTPC(ctx, fctx)
 	})
 }

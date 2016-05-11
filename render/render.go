@@ -4,26 +4,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
-	"net/http"
 	"reflect"
+
+	"github.com/valyala/fasthttp"
 )
 
-func String(w http.ResponseWriter, status int, v string) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(status)
-	w.Write([]byte(v))
+func String(fctx *fasthttp.RequestCtx, status int, v string) {
+	fctx.Response.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	fctx.SetStatusCode(status)
+	fctx.Write([]byte(v))
 }
 
-func HTML(w http.ResponseWriter, status int, v string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	w.Write([]byte(v))
+func HTML(fctx *fasthttp.RequestCtx, status int, v string) {
+	fctx.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
+	fctx.SetStatusCode(status)
+	fctx.Write([]byte(v))
 }
 
-func JSON(w http.ResponseWriter, status int, v interface{}) {
+func JSON(fctx *fasthttp.RequestCtx, status int, v interface{}) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fctx.Error(err.Error(), fasthttp.StatusInternalServerError)
 		return
 	}
 
@@ -33,24 +34,24 @@ func JSON(w http.ResponseWriter, status int, v interface{}) {
 		b = bytes.Replace(b, []byte("\\u0026"), []byte("&"), -1)
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	w.Write(b)
+	fctx.Response.Header.Set("Content-Type", "application/json; charset=utf-8")
+	fctx.SetStatusCode(status)
+	fctx.Write(b)
 }
 
-func Noop(w http.ResponseWriter) {
-	String(w, http.StatusOK, "")
+func Noop(fctx *fasthttp.RequestCtx) {
+	String(fctx, fasthttp.StatusOK, "")
 }
 
-func XML(w http.ResponseWriter, status int, v interface{}) {
+func XML(fctx *fasthttp.RequestCtx, status int, v interface{}) {
 	b, err := xml.Marshal(v)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fctx.Error(err.Error(), fasthttp.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.WriteHeader(status)
+	fctx.Response.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	fctx.SetStatusCode(status)
 
 	// Try to find <?xml header in first 100 bytes (just in case there're some XML comments).
 	findHeaderUntil := len(b)
@@ -59,15 +60,15 @@ func XML(w http.ResponseWriter, status int, v interface{}) {
 	}
 	if bytes.Index(b[:findHeaderUntil], []byte("<?xml")) == -1 {
 		// No header found. Print it out first.
-		w.Write([]byte(xml.Header))
+		fctx.Write([]byte(xml.Header))
 	}
 
-	w.Write(b)
+	fctx.Write(b)
 }
 
-func Respond(w http.ResponseWriter, status int, v interface{}) {
+func Respond(fctx *fasthttp.RequestCtx, status int, v interface{}) {
 	if err, ok := v.(error); ok {
-		JSON(w, status, map[string]interface{}{"error": err.Error()})
+		JSON(fctx, status, map[string]interface{}{"error": err.Error()})
 		return
 	}
 
@@ -77,5 +78,5 @@ func Respond(w http.ResponseWriter, status int, v interface{}) {
 		v = reflect.MakeSlice(val.Type(), 0, 0).Interface()
 	}
 
-	JSON(w, status, v)
+	JSON(fctx, status, v)
 }
